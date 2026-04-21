@@ -1,0 +1,52 @@
+# build output
+build/
+x64/
+Debug/
+Release/
+**/x64/
+**/Debug/
+**/Release/
+
+# vs cache / per-user
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+*.opensdf
+*.sdf
+*.opt
+*.aps
+
+# compile artifacts
+*.obj
+*.pdb
+*.ipdb
+*.iobj
+*.ilk
+*.exp
+*.lib
+!CreateMoveDLL/rcs/MinHook/libMinHook.x64.lib
+*.exe
+*.dll
+*.tlog
+*.recipe
+*.lastbuildstate
+*.cache
+*.idb
+*.log
+*.ipch
+
+# legacy / local-only
+_unused/
+_unobfuscated_backup/
+SpaggetiHop.rar
+
+# tooling
+.mcp.json
+
+# OS
+Thumbs.db
+.DS_Store

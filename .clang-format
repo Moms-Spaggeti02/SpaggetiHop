@@ -1,0 +1,39 @@
+---
+Language: Cpp
+BasedOnStyle: Microsoft
+
+# Put opening braces on the same line
+BreakBeforeBraces: Attach
+
+# Alignment settings to vertically align code elements
+AlignConsecutiveAssignments: true
+AlignConsecutiveDeclarations: true
+AlignConsecutiveMacros: true
+AlignTrailingComments: true
+AlignOperands: Align
+
+# Indentation and Spacing (Appears to match your current code style)
+UseTab: ForIndentation
+IndentWidth: 4
+TabWidth: 4
+
+# Pointer and Reference Alignment (e.g., `const CEntity& Local`)
+PointerAlignment: Left
+
+# Keep spacing before parens for control statements, but not for function calls
+SpaceBeforeParens: ControlStatements
+
+# Keep at most one empty line between sections
+MaxEmptyLinesToKeep: 1
+
+# Ensure functions are separated by a newline
+SeparateDefinitionBlocks: Always
+
+# Keep the attribute on its own line
+BreakAfterAttributes: Always
+
+# Don't merge short functions into one line
+AllowShortFunctionsOnASingleLine: None
+
+# Keep empty lines where you put them (at start of blocks)
+KeepEmptyLinesAtTheStartOfBlocks: true
