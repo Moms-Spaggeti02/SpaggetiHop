@@ -176,11 +176,11 @@ static DWORD WINAPI MainThread(const LPVOID hMod) {
 	freopen_s(&g_console, "CONOUT$", "w", stdout);
 	Log("[bhop] loaded1\n");
 
-	HMODULE client = nullptr;
-	while (!(client = GetModuleHandleA("client.dll")))
+	HMODULE client;
+	while (!((client = GetModuleHandleA("client.dll"))))
 		Sleep(100);
-	HMODULE engine = nullptr;
-	while (!(engine = GetModuleHandleA("engine2.dll")))
+	HMODULE engine;
+	while (!((engine = GetModuleHandleA("engine2.dll"))))
 		Sleep(100);
 
 	g_clientBase = reinterpret_cast<uintptr_t>(client);
