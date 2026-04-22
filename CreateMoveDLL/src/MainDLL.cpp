@@ -195,20 +195,40 @@ static bool g_prevHeld         = false;
 static bool g_prevOnGround     = false;
 static bool g_prevSnapValid    = false;
 
-// pull the local pawn off the entity table. handle is at client+dwLocalPlayerPawn,
-// table layout: pages of 512 x 120-byte slots. returns null when not in a match.
+// local pawn resolution, matching the engine's own GetLocalPlayerPawn (IDA
+// sub_1808E0090 on current build). stale dumper says dwLocalPlayerPawn but
+// that address has zero xrefs in the live binary - the real path is:
+//   controller = dwLocalPlayerController[slot]
+//   handle     = controller + m_hPawn (0x6BC)
+//   pawn       = entityPageTable[handle pagebits][handle slotbits] (with
+//                serial check at slot+0x10)
 static void* ResolveLocalPawn() {
-	void* entSys = *reinterpret_cast<void**>(g_clientBase + offsets::dwEntityList);
-	if (!entSys)
+	// slot 0 = local player on a normal (non-split-screen) session.
+	void* controller = *reinterpret_cast<void**>(g_clientBase + offsets::dwLocalPlayerController);
+	if (!controller)
 		return nullptr;
-	const uint32_t handle = *reinterpret_cast<uint32_t*>(g_clientBase + offsets::dwLocalPlayerPawn);
+
+	const uint32_t handle =
+	    *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(controller) + offsets::m_hPawn);
 	if (handle == UINT32_MAX)
 		return nullptr;
-	const uint32_t  listIdx = (handle & 0x7FFF) >> 9;
-	const uintptr_t chunk   = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(entSys) + 0x10 * listIdx + 0x8);
-	if (!chunk)
+
+	const uintptr_t pageTable = *reinterpret_cast<uintptr_t*>(g_clientBase + offsets::dwEntityPageTable);
+	if (!pageTable)
 		return nullptr;
-	return *reinterpret_cast<void**>(chunk + 120 * (handle & 0x1FF));
+
+	const uint32_t  pageIdx = (handle & 0x7FFF) >> 9;
+	const uintptr_t page    = *reinterpret_cast<uintptr_t*>(pageTable + offsets::ENT_PAGE_STRIDE * pageIdx);
+	if (!page)
+		return nullptr;
+
+	const uintptr_t slot = page + offsets::ENT_SLOT_STRIDE * (handle & 0x1FF);
+	// serial check: slot's cached handle must match ours, else the entity was
+	// freed and the slot reused.
+	if (*reinterpret_cast<uint32_t*>(slot + offsets::ENT_SLOT_HANDLE) != handle)
+		return nullptr;
+
+	return *reinterpret_cast<void**>(slot);
 }
 
 // don't intercept while alt-tabbed or typing in the console / menu.
