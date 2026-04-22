@@ -9,9 +9,18 @@ namespace offsets {
     constexpr uintptr_t dwEntityList       = 0x24CED50; // CGameEntitySystem*
     constexpr uintptr_t dwLocalPlayerPawn  = 0x20547A0; // CHandle<C_CSPlayerPawn>
 
-    // C_BaseEntity netvar
+    // C_BaseEntity netvars
     constexpr uintptr_t m_fFlags           = 0x3F8; // uint32
+    constexpr uintptr_t m_hGroundEntity    = 0x530; // CHandle (UINT32_MAX = not on ground)
     constexpr uint32_t  FL_ONGROUND        = 1 << 0;
+
+    // C_CSPlayerPawn -> CPlayer_MovementServices*
+    constexpr uintptr_t m_pMovementServices = 0x1220;
+
+    // CPlayer_MovementServices: float[4] subtick "when" for forced button edges.
+    // write 0.0 to get earliest-in-tick timing for the jump press, giving the
+    // engine sub-tick precision on the bhop instead of whole-tick granularity.
+    constexpr uintptr_t m_arrForceSubtickMoveWhen = 0x1B0;
 
     // jump button state the engine reads. dumper calls this buttons::jump now.
     // press = 0x10001, release = 0x100.
