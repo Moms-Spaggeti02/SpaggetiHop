@@ -6,8 +6,6 @@
 #include <cstring>
 #include <vector>
 
-#include "../../CreateMoveDLL/rcs/obf.h"
-
 #pragma comment(lib, "psapi.lib")
 
 // manual-map launcher.
@@ -137,8 +135,7 @@ static FILE* g_logFile = nullptr;
 
 static void OpenLog() {
 	char path[MAX_PATH] = {};
-	auto logName = OBF("bhop_inject.log");
-	auto mode    = OBF("w");
+	const char* logName = "bhop_inject.log";
 	if (GetModuleFileNameA(nullptr, path, MAX_PATH)) {
 		char* slash = strrchr(path, '\\');
 		if (slash && (slash + 1 - path) + strlen(logName) < MAX_PATH)
@@ -148,7 +145,7 @@ static void OpenLog() {
 	} else {
 		strcpy_s(path, MAX_PATH, logName);
 	}
-	fopen_s(&g_logFile, path, mode);
+	fopen_s(&g_logFile, path, "w");
 }
 
 static void CloseLog() {
@@ -218,31 +215,29 @@ static void Log(const char* fmt, ...) {
 	}
 }
 
-// pull the embedded dll out of our own PE
+// pull the embedded dll out of our own PE. ID 101 matches the Bhop.rc RCDATA entry.
 static bool LoadEmbeddedDLL(const uint8_t*& outBytes, size_t& outSize) {
-	// using MAKEINTRESOURCEA(101) so the name isn't sitting in .rdata as a string
 	HRSRC hRes = FindResourceA(nullptr, MAKEINTRESOURCEA(101), reinterpret_cast<LPCSTR>(RT_RCDATA));
 	if (!hRes) {
-		Log(OBF("[!] FindResource failed: %lu\n"), GetLastError());
+		Log("[!] FindResource failed: %lu\n", GetLastError());
 		return false;
 	}
 	HGLOBAL hData = LoadResource(nullptr, hRes);
 	if (!hData) {
-		Log(OBF("[!] LoadResource failed: %lu\n"), GetLastError());
+		Log("[!] LoadResource failed: %lu\n", GetLastError());
 		return false;
 	}
 	outBytes = reinterpret_cast<const uint8_t*>(LockResource(hData));
 	outSize  = SizeofResource(nullptr, hRes);
 	if (!outBytes || !outSize) {
-		Log(OBF("[!] Embedded DLL resource is empty\n"));
+		Log("[!] Embedded DLL resource is empty\n");
 		return false;
 	}
 	return true;
 }
 
 // process / module helpers
-// compare by hash so "cs2.exe" etc. isn't laying around as a string
-static DWORD GetProcessIdByHash(uint32_t nameHash) {
+static DWORD GetProcessIdByName(const wchar_t* name) {
 	HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 	if (snap == INVALID_HANDLE_VALUE) return 0;
 
@@ -252,7 +247,7 @@ static DWORD GetProcessIdByHash(uint32_t nameHash) {
 	DWORD pid = 0;
 	if (Process32FirstW(snap, &pe)) {
 		do {
-			if (obf::hash(pe.szExeFile) == nameHash) {
+			if (_wcsicmp(pe.szExeFile, name) == 0) {
 				pid = pe.th32ProcessID;
 				break;
 			}
@@ -262,7 +257,7 @@ static DWORD GetProcessIdByHash(uint32_t nameHash) {
 	return pid;
 }
 
-static bool WaitForRemoteModulesByHash(HANDLE hProc, const uint32_t* hashes, int count, DWORD timeoutMs) {
+static bool WaitForRemoteModules(HANDLE hProc, const wchar_t* const* names, int count, DWORD timeoutMs) {
 	const DWORD start = GetTickCount();
 	std::vector<HMODULE> mods(1024);
 
@@ -285,7 +280,7 @@ static bool WaitForRemoteModulesByHash(HANDLE hProc, const uint32_t* hashes, int
 				if (GetModuleFileNameExW(hProc, mods[j], modPath, MAX_PATH)) {
 					const wchar_t* slash = wcsrchr(modPath, L'\\');
 					const wchar_t* base  = slash ? slash + 1 : modPath;
-					if (obf::hash(base) == hashes[i]) { ++found; break; }
+					if (_wcsicmp(base, names[i]) == 0) { ++found; break; }
 				}
 			}
 		}
@@ -299,21 +294,21 @@ static bool WaitForRemoteModulesByHash(HANDLE hProc, const uint32_t* hashes, int
 // manual-map guts
 static bool ManualMap(HANDLE hProc, const uint8_t* raw, size_t rawSize) {
 	if (rawSize < sizeof(IMAGE_DOS_HEADER)) {
-		Log(OBF("[!] DLL bytes too small\n"));
+		Log("[!] DLL bytes too small\n");
 		return false;
 	}
 	auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(raw);
 	if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
-		Log(OBF("[!] Invalid DOS signature\n"));
+		Log("[!] Invalid DOS signature\n");
 		return false;
 	}
 	auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(raw + dos->e_lfanew);
 	if (nt->Signature != IMAGE_NT_SIGNATURE) {
-		Log(OBF("[!] Invalid NT signature\n"));
+		Log("[!] Invalid NT signature\n");
 		return false;
 	}
 	if (nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64) {
-		Log(OBF("[!] Embedded DLL is not x64\n"));
+		Log("[!] Embedded DLL is not x64\n");
 		return false;
 	}
 
@@ -322,13 +317,13 @@ static bool ManualMap(HANDLE hProc, const uint8_t* raw, size_t rawSize) {
 	void* remoteBase = VirtualAllocEx(hProc, nullptr, imageSize,
 		MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 	if (!remoteBase) {
-		Log(OBF("[!] VirtualAllocEx(image) failed: %lu\n"), GetLastError());
+		Log("[!] VirtualAllocEx(image) failed: %lu\n", GetLastError());
 		return false;
 	}
-	Log(OBF("[+] Image alloc @ %p (0x%X bytes)\n"), remoteBase, imageSize);
+	Log("[+] Image alloc @ %p (0x%X bytes)\n", remoteBase, imageSize);
 
 	if (!WriteProcessMemory(hProc, remoteBase, raw, nt->OptionalHeader.SizeOfHeaders, nullptr)) {
-		Log(OBF("[!] WriteProcessMemory(headers) failed: %lu\n"), GetLastError());
+		Log("[!] WriteProcessMemory(headers) failed: %lu\n", GetLastError());
 		VirtualFreeEx(hProc, remoteBase, 0, MEM_RELEASE);
 		return false;
 	}
@@ -340,31 +335,29 @@ static bool ManualMap(HANDLE hProc, const uint8_t* raw, size_t rawSize) {
 				reinterpret_cast<uint8_t*>(remoteBase) + section->VirtualAddress,
 				raw + section->PointerToRawData,
 				section->SizeOfRawData, nullptr)) {
-			Log(OBF("[!] WriteProcessMemory(section %.8s) failed: %lu\n"),
+			Log("[!] WriteProcessMemory(section %.8s) failed: %lu\n",
 				section->Name, GetLastError());
 			VirtualFreeEx(hProc, remoteBase, 0, MEM_RELEASE);
 			return false;
 		}
 	}
-	Log(OBF("[+] Wrote %d sections\n"), nt->FileHeader.NumberOfSections);
+	Log("[+] Wrote %d sections\n", nt->FileHeader.NumberOfSections);
 
 	ManualMapData data{};
 	data.imageBase = reinterpret_cast<uintptr_t>(remoteBase);
 	data.ntHeaders = reinterpret_cast<uintptr_t>(remoteBase) + dos->e_lfanew;
 
-	// resolve everything by hash so kernel32/ntdll names don't show up in .rdata
-	// and nothing looks up "LoadLibraryA" etc. by name
-	HMODULE hK32   = obf::mod(obf::hash(L"kernel32.dll"));
-	HMODULE hNtdll = obf::mod(obf::hash(L"ntdll.dll"));
-	data.pLoadLibraryA        = reinterpret_cast<uintptr_t>(obf::api(hK32, obf::hash("LoadLibraryA")));
-	data.pGetProcAddress      = reinterpret_cast<uintptr_t>(obf::api(hK32, obf::hash("GetProcAddress")));
-	data.pRtlAddFunctionTable = reinterpret_cast<uintptr_t>(obf::api(hK32, obf::hash("RtlAddFunctionTable")));
+	HMODULE hK32   = GetModuleHandleW(L"kernel32.dll");
+	HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+	data.pLoadLibraryA        = reinterpret_cast<uintptr_t>(GetProcAddress(hK32, "LoadLibraryA"));
+	data.pGetProcAddress      = reinterpret_cast<uintptr_t>(GetProcAddress(hK32, "GetProcAddress"));
+	data.pRtlAddFunctionTable = reinterpret_cast<uintptr_t>(GetProcAddress(hK32, "RtlAddFunctionTable"));
 	if (!data.pRtlAddFunctionTable)
-		data.pRtlAddFunctionTable = reinterpret_cast<uintptr_t>(obf::api(hNtdll, obf::hash("RtlAddFunctionTable")));
+		data.pRtlAddFunctionTable = reinterpret_cast<uintptr_t>(GetProcAddress(hNtdll, "RtlAddFunctionTable"));
 
 	const size_t shellcodeSize = reinterpret_cast<uintptr_t>(&ShellcodeEnd) - reinterpret_cast<uintptr_t>(&Shellcode);
 	if (shellcodeSize == 0 || shellcodeSize > 0x4000) {
-		Log(OBF("[!] Shellcode size implausible (%zu) — linker layout issue\n"), shellcodeSize);
+		Log("[!] Shellcode size implausible (%zu), linker layout issue\n", shellcodeSize);
 		VirtualFreeEx(hProc, remoteBase, 0, MEM_RELEASE);
 		return false;
 	}
@@ -373,7 +366,7 @@ static bool ManualMap(HANDLE hProc, const uint8_t* raw, size_t rawSize) {
 	void* remoteStub = VirtualAllocEx(hProc, nullptr, totalSize,
 		MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 	if (!remoteStub) {
-		Log(OBF("[!] VirtualAllocEx(stub) failed: %lu\n"), GetLastError());
+		Log("[!] VirtualAllocEx(stub) failed: %lu\n", GetLastError());
 		VirtualFreeEx(hProc, remoteBase, 0, MEM_RELEASE);
 		return false;
 	}
@@ -383,17 +376,17 @@ static bool ManualMap(HANDLE hProc, const uint8_t* raw, size_t rawSize) {
 
 	if (!WriteProcessMemory(hProc, remoteData, &data, sizeof(data), nullptr)
 		|| !WriteProcessMemory(hProc, remoteCode, reinterpret_cast<void*>(&Shellcode), shellcodeSize, nullptr)) {
-		Log(OBF("[!] WriteProcessMemory(stub) failed: %lu\n"), GetLastError());
+		Log("[!] WriteProcessMemory(stub) failed: %lu\n", GetLastError());
 		VirtualFreeEx(hProc, remoteBase, 0, MEM_RELEASE);
 		VirtualFreeEx(hProc, remoteStub, 0, MEM_RELEASE);
 		return false;
 	}
-	Log(OBF("[+] Stub written (%zu bytes shellcode)\n"), shellcodeSize);
+	Log("[+] Stub written (%zu bytes shellcode)\n", shellcodeSize);
 
 	HANDLE hThread = CreateRemoteThread(hProc, nullptr, 0,
 		reinterpret_cast<LPTHREAD_START_ROUTINE>(remoteCode), remoteData, 0, nullptr);
 	if (!hThread) {
-		Log(OBF("[!] CreateRemoteThread failed: %lu\n"), GetLastError());
+		Log("[!] CreateRemoteThread failed: %lu\n", GetLastError());
 		VirtualFreeEx(hProc, remoteBase, 0, MEM_RELEASE);
 		VirtualFreeEx(hProc, remoteStub, 0, MEM_RELEASE);
 		return false;
@@ -409,45 +402,39 @@ static bool ManualMap(HANDLE hProc, const uint8_t* raw, size_t rawSize) {
 
 // entry
 int main() {
-	{ auto title = OBF("SpaggetiHop"); SetConsoleTitleA(title); }
+	SetConsoleTitleA("SpaggetiHop");
 	OpenLog();
 
 	EnableVT();
 
-	// banner, hot pink (255,105,180).
-	// whole thing (ansi + art) is OBF'd, only decrypts on the stack right before printing.
-	// closing \x1b[0m resets the color after the raw string.
-	auto banner = OBF(
+	// banner, hot pink (255,105,180). closing \x1b[0m resets the color.
+	static const char* banner =
 		"\x1b[38;2;255;105;180m"
 		R"(
-   _____                              __  _ __  __                                               
-  / ___/____  ____ _____ _____ ____  / /_(_) / / /___  ____      __      __                          
-  \__ \/ __ \/ __ `/ __ `/ __ `/ _ \/ __/ / /_/ / __ \/ __ \  __/ /_  __/ /_                         
- ___/ / /_/ / /_/ / /_/ / /_/ /  __/ /_/ / __  / /_/ / /_/ / /_  __/ /_  __/                         
-/____/ .___/\__,_/\__, /\__, /\___/\__/_/_/ /_/\____/ .___/   /_/     /_/                            
-    /_/          /____//____/                      /_/                                           
-                                                                                                 
- ______	 ______	 ______  ______	 ______	 ______	 ______	 ______	 ______	 ______	
+   _____                              __  _ __  __
+  / ___/____  ____ _____ _____ ____  / /_(_) / / /___  ____      __      __
+  \__ \/ __ \/ __ `/ __ `/ __ `/ _ \/ __/ / /_/ / __ \/ __ \  __/ /_  __/ /_
+ ___/ / /_/ / /_/ / /_/ / /_/ /  __/ /_/ / __  / /_/ / /_/ / /_  __/ /_  __/
+/____/ .___/\__,_/\__, /\__, /\___/\__/_/_/ /_/\____/ .___/   /_/     /_/
+    /_/          /____//____/                      /_/
+
+ ______	 ______	 ______  ______	 ______	 ______	 ______	 ______	 ______	 ______
 /_____/	/_____/	/_____/ /_____/	/_____/	/_____/	/_____/	/_____/	/_____/	/_____/
 
 )"
-		"\x1b[0m\n");
-	fputs(banner.c_str(), stdout);
+		"\x1b[0m\n";
+	fputs(banner, stdout);
 	fflush(stdout);
 
 	const uint8_t* dllBytes = nullptr;
 	size_t dllSize = 0;
 	if (!LoadEmbeddedDLL(dllBytes, dllSize)) {
-		Log(OBF("[!] no embedded DLL — rebuild the solution\n"));
-		{ auto p = OBF("pause"); system(p); }
+		Log("[!] no embedded DLL, rebuild the solution\n");
+		system("pause");
 		return 1;
 	}
-	Log(OBF("[+] embedded DLL: %zu bytes\n"), dllSize);
-	Log(OBF("[*] waiting for cs2.exe...\n"));
-
-	constexpr uint32_t hCs2      = obf::hash(L"cs2.exe");
-	constexpr uint32_t hClientDl = obf::hash(L"client.dll");
-	constexpr uint32_t hEngine2  = obf::hash(L"engine2.dll");
+	Log("[+] embedded DLL: %zu bytes\n", dllSize);
+	Log("[*] waiting for cs2.exe...\n");
 
 	// start the wave *after* all the pre-wait log lines, otherwise stdout
 	// writes race with the worker redrawing frames. only spins during the
@@ -457,7 +444,7 @@ int main() {
 
 	DWORD pid = 0;
 	for (int i = 0; i < 600; i++) { // ~5 min
-		pid = GetProcessIdByHash(hCs2);
+		pid = GetProcessIdByName(L"cs2.exe");
 		if (pid) break;
 		Sleep(500);
 	}
@@ -467,37 +454,37 @@ int main() {
 	if (hAnim) { WaitForSingleObject(hAnim, 500); CloseHandle(hAnim); }
 
 	if (!pid) {
-		Log(OBF("[!] cs2.exe not found within timeout\n"));
-		{ auto p = OBF("pause"); system(p); }
+		Log("[!] cs2.exe not found within timeout\n");
+		system("pause");
 		return 1;
 	}
-	Log(OBF("[+] cs2.exe PID=%lu\n"), pid);
+	Log("[+] cs2.exe PID=%lu\n", pid);
 
 	HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
 	if (!hProc) {
-		Log(OBF("[!] OpenProcess failed: %lu (try admin)\n"), GetLastError());
-		{ auto p = OBF("pause"); system(p); }
+		Log("[!] OpenProcess failed: %lu (try admin)\n", GetLastError());
+		system("pause");
 		return 1;
 	}
 
-	Log(OBF("[*] waiting for client.dll + engine2.dll...\n"));
-	const uint32_t wanted[] = { hClientDl, hEngine2 };
-	if (!WaitForRemoteModulesByHash(hProc, wanted, 2, 120000)) {
-		Log(OBF("[!] client.dll / engine2.dll did not load within 2 minutes\n"));
+	Log("[*] waiting for client.dll + engine2.dll...\n");
+	const wchar_t* wanted[] = { L"client.dll", L"engine2.dll" };
+	if (!WaitForRemoteModules(hProc, wanted, 2, 120000)) {
+		Log("[!] client.dll / engine2.dll did not load within 2 minutes\n");
 		CloseHandle(hProc);
-		{ auto p = OBF("pause"); system(p); }
+		system("pause");
 		return 1;
 	}
-	Log(OBF("[+] target modules ready\n"));
+	Log("[+] target modules ready\n");
 
 	if (!ManualMap(hProc, dllBytes, dllSize)) {
 		CloseHandle(hProc);
-		{ auto p = OBF("pause"); system(p); }
+		system("pause");
 		return 1;
 	}
 
 	CloseHandle(hProc);
-	Log(OBF("[+] injected — closing launcher (DLL console stays)\n"));
+	Log("[+] injected, closing launcher (DLL console stays)\n");
 	Sleep(400);
 	CloseLog();
 	FreeConsole();

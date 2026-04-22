@@ -42,6 +42,7 @@ Release/
 # legacy / local-only
 _unused/
 _unobfuscated_backup/
+_obfuscated_backup/
 SpaggetiHop.rar
 
 # tooling
