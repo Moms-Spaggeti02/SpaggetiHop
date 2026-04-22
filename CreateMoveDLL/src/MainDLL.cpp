@@ -177,13 +177,20 @@ static int  g_lastBhopTick = -1;
 // keeps us at old-tick-flip behavior instead of going silent.
 static bool g_tickFlip = false;
 
-// tunables. STAMINA_CAP set very high so it's effectively off until we know
-// the real scale from logs. YAW_DEADZONE / CMD_MAX_MOVE kept for the stashed
-// autostrafe func we'll re-enable once we find where cmd-sidemove actually
-// sources from.
-static constexpr float STAMINA_CAP  = 200.0f; // disabled until we verify scale
-static constexpr float YAW_DEADZONE = 0.25f;
-static constexpr float CMD_MAX_MOVE = 450.0f;
+// tunables.
+// STAMINA_CAP set very high (off) until we know the real scale from logs.
+// YAW_DEADZONE / CMD_MAX_MOVE kept for the stashed cmd-move autostrafe path.
+// AUTOSTRAFE_* drive the experimental view-yaw override which writes to the
+// pawn's m_angEyeAngles pre-CreateMove hoping the cmd-builder sources its
+// viewangle from there. If it propagates we get a "free" airstrafe bypass of
+// the landing velocity clamp since the engine naturally applies air accel.
+static constexpr float STAMINA_CAP    = 200.0f;
+static constexpr float YAW_DEADZONE   = 0.25f;
+static constexpr float CMD_MAX_MOVE   = 450.0f;
+static constexpr bool  AUTOSTRAFE_ON  = true;  // master switch for the view override
+static constexpr float AS_MIN_SPEED   = 60.0f; // don't strafe if we're barely moving
+static constexpr float AS_STEP_DEG    = 1.6f;  // max yaw rotation per hook call (deg)
+static constexpr float AS_PI          = 3.14159265358979f;
 
 // diagnostic state. heartbeat prints a few times at startup regardless of
 // anything else so we know the hook is alive; after that, throttled to every
@@ -312,6 +319,59 @@ static void ApplyAutostrafe(const TickSnapshot& s) {
 	*reinterpret_cast<float*>(mvsB + offsets::m_flLeftMove)    = side;
 }
 
+// normalize an angle to [-180, 180].
+static float WrapAngle(float a) {
+	while (a > 180.0f)
+		a -= 360.0f;
+	while (a < -180.0f)
+		a += 360.0f;
+	return a;
+}
+
+// experimental: rotate the pawn's view yaw toward the optimal airstrafe
+// heading. if the cmd-builder sources its viewangle from m_angEyeAngles the
+// cmd ships with our rotated yaw, CRC matches (we modified before CRC runs),
+// and the engine naturally applies air-accel with forward-held-wishdir now
+// perpendicular to velocity -> airspeed climbs past run cap -> even after
+// CS2's ~0.65 jump clamp we launch well above 165 u/s.
+//
+// if the cmd-builder pulls viewangles from elsewhere (separate input cache),
+// writing here changes nothing about the shipped cmd and we'll just see the
+// view twitch with no speed gain. either way it's not a cmd mutation so no
+// CRC kick risk.
+static void ApplyViewAutostrafe(const TickSnapshot& s) {
+	if (!AUTOSTRAFE_ON || !s.valid || s.onGround)
+		return;
+
+	// velocity too low -> can't compute a stable direction, and nothing to
+	// accelerate anyway. idle-air-strafing just looks like a drunk bot.
+	if (s.speed2d < AS_MIN_SPEED)
+		return;
+
+	auto*        pawnB    = static_cast<uint8_t*>(s.pawn);
+	const float* vel      = reinterpret_cast<const float*>(pawnB + offsets::m_vecVelocity);
+	const float  velYaw   = std::atan2(vel[1], vel[0]) * (180.0f / AS_PI); // [-180, 180]
+	float*       angles   = reinterpret_cast<float*>(pawnB + offsets::m_angEyeAngles);
+	const float  curYaw   = angles[1];
+
+	// optimal airstrafe heading: perpendicular to velocity. pick whichever side
+	// is closer to where the player is currently looking, so the view only has
+	// to drift a little per tick instead of snapping 180 deg.
+	const float perpA  = velYaw + 90.0f;
+	const float perpB  = velYaw - 90.0f;
+	const float deltaA = fabsf(WrapAngle(perpA - curYaw));
+	const float deltaB = fabsf(WrapAngle(perpB - curYaw));
+	const float target = (deltaA < deltaB) ? perpA : perpB;
+
+	// smooth step toward target, capped per tick so the view drifts rather
+	// than snapping. AS_STEP_DEG ~= a tick worth at ~100 deg/sec which is
+	// comparable to a human flicking slightly while bhopping.
+	const float need      = WrapAngle(target - curYaw);
+	const float stepMag   = fabsf(need) < AS_STEP_DEG ? fabsf(need) : AS_STEP_DEG;
+	const float step      = (need > 0.0f ? 1.0f : -1.0f) * stepMag;
+	angles[1]             = WrapAngle(curYaw + step);
+}
+
 static void __fastcall hkCreateMove(const uintptr_t pThis, const unsigned slot, const uintptr_t cmd) {
 	const bool         held = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0 && GameHasFocus();
 	const TickSnapshot snap = ReadTickSnapshot();
@@ -338,11 +398,12 @@ static void __fastcall hkCreateMove(const uintptr_t pThis, const unsigned slot, 
 		g_prevOnGround = snap.onGround;
 	}
 
-	// autostrafe disabled for now: writing to m_flCmdLeftMove pre-oCreateMove
-	// isn't propagating into the shipped cmd — the cmd-builder sources sidemove
-	// from the raw input poll, not from the movement-services cached values.
-	// proper fix requires a different hook point or a cmd-mutation path with
-	// working CRC recalc.
+	// experimental view-yaw autostrafe. writes to pawn->m_angEyeAngles pre-
+	// oCreateMove hoping the cmd-builder pulls viewangles from there. if it
+	// does, the cmd ships with rotated yaw -> natural airstrafe kicks in.
+	// toggle with AUTOSTRAFE_ON. visible view drift is expected.
+	if (held && snap.valid && !snap.onGround)
+		ApplyViewAutostrafe(snap);
 
 	oCreateMove(pThis, slot, cmd);
 
