@@ -6,15 +6,15 @@
 // everything is relative to client.dll unless i say otherwise.
 namespace offsets {
     // client.dll
-    constexpr uintptr_t dwEntityList       = 0x24C9710; // CGameEntitySystem*
-    constexpr uintptr_t dwLocalPlayerPawn  = 0x204F630; // CHandle<C_CSPlayerPawn>
+    constexpr uintptr_t dwEntityList       = 0x24CED50; // CGameEntitySystem*
+    constexpr uintptr_t dwLocalPlayerPawn  = 0x20547A0; // CHandle<C_CSPlayerPawn>
 
     // C_BaseEntity netvar
-    constexpr uintptr_t m_fFlags           = 0x400; // uint32
+    constexpr uintptr_t m_fFlags           = 0x3F8; // uint32
 
-    // jump button state the engine reads.
+    // jump button state the engine reads. dumper calls this buttons::jump now.
     // press = 0x10001, release = 0x100.
-    constexpr uintptr_t dwForceJump        = 0x2048DB0;
+    constexpr uintptr_t dwForceJump        = 0x204DF30;
 
     // engine2.dll, CNetworkGameClient, used for tick sync
     constexpr uintptr_t dwNetworkGameClient            = 0x90A0C0;

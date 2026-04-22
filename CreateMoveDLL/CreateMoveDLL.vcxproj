@@ -101,7 +101,6 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="rcs\MinHook\MinHook.h" />
-    <ClInclude Include="rcs\obf.h" />
     <ClInclude Include="rcs\SDK.h" />
   </ItemGroup>
   <ItemGroup>

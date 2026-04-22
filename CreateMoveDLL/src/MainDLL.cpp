@@ -6,10 +6,8 @@
 
 #include "../rcs/MinHook/MinHook.h"
 #include "../rcs/SDK.h"
-#include "../rcs/obf.h"
 
-// sig is split in two so the whole pattern isn't sitting in .rdata.
-// glued back together on the stack inside MainThread.
+static const char* SIG_CREATE_MOVE = "48 8B C4 4C 89 40 ?? 48 89 48 ?? 55 53 41 54";
 
 constexpr uint32_t FJ_PRESS   = 65537; // 0x10001
 constexpr uint32_t FJ_RELEASE = 256;   // 0x100
@@ -39,7 +37,7 @@ static void LogError(const char* fmt, ...) {
 	va_end(a);
 
 	char path[MAX_PATH] = {};
-	const auto logName = OBF("bhop_error.log");
+	const char* logName = "bhop_error.log";
 	if (g_hMod && GetModuleFileNameA(g_hMod, path, MAX_PATH)) {
 		if (char* slash = strrchr(path, '\\'); slash && (slash + 1 - path) + strlen(logName) < MAX_PATH)
 			strcpy_s(slash + 1, MAX_PATH - (slash + 1 - path), logName);
@@ -50,8 +48,7 @@ static void LogError(const char* fmt, ...) {
 	}
 
 	FILE* f = nullptr;
-	const auto mode = OBF("w");
-	fopen_s(&f, path, mode);
+	fopen_s(&f, path, "w");
 	if (!f)
 		return;
 	va_start(a, fmt);
@@ -81,7 +78,7 @@ static uintptr_t PatternScan(const uintptr_t base, const size_t size, const char
 
 	for (const char* p = sig; *p;) {
 		if (n >= MAX_TOKENS) {
-			LogError(OBF("[!] PatternScan: sig exceeds %zu-byte limit, truncated at '%s'\n"),
+			LogError("[!] PatternScan: sig exceeds %zu-byte limit, truncated at '%s'\n",
 				MAX_TOKENS, p);
 			return 0;
 		}
@@ -99,7 +96,7 @@ static uintptr_t PatternScan(const uintptr_t base, const size_t size, const char
 			continue;
 		}
 		if (!isHex(p[0]) || !isHex(p[1])) {
-			LogError(OBF("[!] PatternScan: odd-length or non-hex token at offset %td ('%c%c')\n"),
+			LogError("[!] PatternScan: odd-length or non-hex token at offset %td ('%c%c')\n",
 				p - sig, p[0] ? p[0] : '?', p[1] ? p[1] : '?');
 			return 0;
 		}
@@ -108,7 +105,7 @@ static uintptr_t PatternScan(const uintptr_t base, const size_t size, const char
 		p += 2;
 	}
 	if (n == 0) {
-		LogError(OBF("[!] PatternScan: empty pattern\n"));
+		LogError("[!] PatternScan: empty pattern\n");
 		return 0;
 	}
 
@@ -176,60 +173,45 @@ static void __fastcall hkCreateMove(const uintptr_t pThis, const unsigned slot, 
 
 static DWORD WINAPI MainThread(const LPVOID hMod) {
 	AllocConsole();
-	{
-		const auto dev  = OBF("CONOUT$");
-		const auto mode = OBF("w");
-		freopen_s(&g_console, dev, mode, stdout);
-	}
-	Log(OBF("[bhop] loaded1\n"));
+	freopen_s(&g_console, "CONOUT$", "w", stdout);
+	Log("[bhop] loaded1\n");
 
-	// constexpr = hashed at compile time. the actual strings don't end up in the binary.
-	constexpr uint32_t hClient = obf::hash(L"client.dll");
-	constexpr uint32_t hEngine = obf::hash(L"engine2.dll");
-	HMODULE client;
-	while (!((client = obf::mod(hClient)))) Sleep(100);
-	HMODULE engine;
-	while (!((engine = obf::mod(hEngine)))) Sleep(100);
+	HMODULE client = nullptr;
+	while (!(client = GetModuleHandleA("client.dll")))
+		Sleep(100);
+	HMODULE engine = nullptr;
+	while (!(engine = GetModuleHandleA("engine2.dll")))
+		Sleep(100);
 
 	g_clientBase = reinterpret_cast<uintptr_t>(client);
 	g_engineBase = reinterpret_cast<uintptr_t>(engine);
 	const size_t size  = ModuleSize(g_clientBase);
 
-	Log(OBF("[bhop] modules resolved\n"));
+	Log("[bhop] modules resolved\n");
 
 	g_pForceJump = reinterpret_cast<uint32_t*>(g_clientBase + offsets::dwForceJump);
 	g_pNGC       = reinterpret_cast<void**>(g_engineBase + offsets::dwNetworkGameClient);
 
-	// stitch the sig back together on the stack, throw it away after.
-	char sig[64];
-	{
-		const auto   h  = OBF("48 8B C4 4C 89 40 ?? 48 89");
-		const auto   t  = OBF(" 48 ?? 55 53 41 54");
-		const size_t hn = strlen(h);
-		const size_t tn = strlen(t);
-		memcpy(sig, h.buf, hn);
-		memcpy(sig + hn, t.buf, tn + 1);
-	}
-	const uintptr_t cmAddr = PatternScan(g_clientBase, size, sig);
+	const uintptr_t cmAddr = PatternScan(g_clientBase, size, SIG_CREATE_MOVE);
 	if (!cmAddr) {
-		LogError(OBF("[!] CreateMove sig miss\n"));
+		LogError("[!] CreateMove sig miss\n");
 		return 1;
 	}
-	Log(OBF("[bhop] CreateMove @ client+0x%llx\n"), static_cast<unsigned long long>(cmAddr - g_clientBase));
+	Log("[bhop] CreateMove @ client+0x%llx\n", static_cast<unsigned long long>(cmAddr - g_clientBase));
 
 	if (MH_Initialize() != MH_OK) {
-		Log(OBF("[!] MH_Initialize\n"));
+		Log("[!] MH_Initialize\n");
 		return 1;
 	}
 	if (MH_CreateHook(reinterpret_cast<LPVOID>(cmAddr), &hkCreateMove, reinterpret_cast<LPVOID*>(&oCreateMove)) != MH_OK) {
-		Log(OBF("[!] MH_CreateHook\n"));
+		Log("[!] MH_CreateHook\n");
 		return 1;
 	}
 	if (MH_EnableHook(reinterpret_cast<LPVOID>(cmAddr)) != MH_OK) {
-		Log(OBF("[!] MH_EnableHook\n"));
+		Log("[!] MH_EnableHook\n");
 		return 1;
 	}
-	Log(OBF("[bhop] hook ON — SPACE=bhop, END=unload\n"));
+	Log("[bhop] hook ON, SPACE=bhop, END=unload\n");
 
 	while (g_unloadReason == UNLOAD_NONE && !(GetAsyncKeyState(VK_END) & 0x8000))
 		Sleep(50);
@@ -252,7 +234,7 @@ static DWORD WINAPI MainThread(const LPVOID hMod) {
 	}
 
 	*g_pForceJump = FJ_RELEASE;
-	Log(OBF("[bhop] unloaded\n"));
+	Log("[bhop] unloaded\n");
 	if (g_console)
 		fclose(g_console);
 	FreeConsole();
