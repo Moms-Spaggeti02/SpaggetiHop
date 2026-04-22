@@ -2,12 +2,29 @@
 #include <cstdint>
 #include <Windows.h>
 
-// CS2 offsets. these break every update, pull fresh ones from a2x / offsets.hpp.
-// everything is relative to client.dll unless i say otherwise.
+// CS2 offsets. these break every update. cross-check each one against IDA
+// whenever the game patches: right-click the a2x-dumper name -> look for the
+// real read site in decompile. dumper's dwLocalPlayerPawn is stale (dead
+// slot) in current builds -> use the controller path instead.
+// everything is relative to client.dll unless noted.
 namespace offsets {
     // client.dll
-    constexpr uintptr_t dwEntityList       = 0x24CED50; // CGameEntitySystem*
-    constexpr uintptr_t dwLocalPlayerPawn  = 0x20547A0; // CHandle<C_CSPlayerPawn>
+    constexpr uintptr_t dwEntityList            = 0x24CED50; // CGameEntitySystem* (vtable-having obj)
+    constexpr uintptr_t dwLocalPlayerController = 0x2308540; // CBasePlayerController* array (slot 0 = local)
+
+    // entity page-table base. cached in .data by the engine on init, so we can
+    // skip walking CGameEntitySystem internals and read it directly.
+    // layout: array of QWORD page pointers (stride 8). each page points to a
+    // chunk of 512 entity slots, each slot is 112 bytes.
+    // slot+0  = entity* (QWORD)
+    // slot+16 = full handle (DWORD) for serial check
+    constexpr uintptr_t dwEntityPageTable = 0x219A130;
+    constexpr size_t    ENT_PAGE_STRIDE   = 8;
+    constexpr size_t    ENT_SLOT_STRIDE   = 112;
+    constexpr size_t    ENT_SLOT_HANDLE   = 16;
+
+    // CBasePlayerController netvar - pawn handle on the controller.
+    constexpr uintptr_t m_hPawn = 0x6BC;
 
     // C_BaseEntity netvars
     constexpr uintptr_t m_fFlags           = 0x3F8; // uint32
