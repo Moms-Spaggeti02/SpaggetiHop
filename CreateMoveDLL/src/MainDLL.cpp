@@ -202,13 +202,31 @@ static void __fastcall hkCreateMove(const uintptr_t pThis, const unsigned slot, 
 		return;
 	g_lastBhopTick = tick;
 
-	// primary path: FL_ONGROUND gate. emit PRESS only on ground ticks so each
-	// landing converts cleanly instead of the 50/50 lottery the pure-flip had.
+	// primary path: ground gate via m_fFlags & FL_ONGROUND OR-ed with
+	// m_hGroundEntity (handle != UINT32_MAX). FL_ONGROUND can lag by a tick on
+	// edge contacts (stairs, rotating brushes); the ground entity handle
+	// transitions one step earlier in those cases, so OR-ing catches both.
 	if (void* pawn = ResolveLocalPawn()) {
-		const uint32_t flags    = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(pawn) + offsets::m_fFlags);
-		const bool     onGround = (flags & offsets::FL_ONGROUND) != 0;
-		*g_pForceJump           = onGround ? FJ_PRESS : FJ_RELEASE;
-		g_tickFlip              = false;
+		const uint32_t flags   = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(pawn) + offsets::m_fFlags);
+		const uint32_t hGround = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(pawn) + offsets::m_hGroundEntity);
+		const bool onGround    = (flags & offsets::FL_ONGROUND) != 0 || hGround != UINT32_MAX;
+
+		if (onGround) {
+			// subtick precision: force the jump edge to emit at t=0.0 of this
+			// tick so we don't waste the fraction of tick between ground contact
+			// and the engine's default subtick slot. writes all 4 slots (attack,
+			// attack2, jump, duck) because only buttons whose force-* cell is
+			// PRESS consume the value, so stray writes to the others are inert.
+			void* mvs = *reinterpret_cast<void**>(static_cast<uint8_t*>(pawn) + offsets::m_pMovementServices);
+			if (mvs) {
+				float* arr = reinterpret_cast<float*>(static_cast<uint8_t*>(mvs) + offsets::m_arrForceSubtickMoveWhen);
+				arr[0] = arr[1] = arr[2] = arr[3] = 0.0f;
+			}
+			*g_pForceJump = FJ_PRESS;
+		} else {
+			*g_pForceJump = FJ_RELEASE;
+		}
+		g_tickFlip = false;
 		return;
 	}
 
