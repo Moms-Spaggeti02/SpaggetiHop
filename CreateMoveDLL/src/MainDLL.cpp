@@ -1,4 +1,5 @@
 #include <Windows.h>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -153,6 +154,20 @@ static int  g_lastBhopTick = -1;
 // keeps us at old-tick-flip behavior instead of going silent.
 static bool g_tickFlip = false;
 
+// autostrafe config. exposed as plain statics so we can tune without rebuild.
+// STAMINA_CAP: skip a jump when stamina is above this (gives consistent max
+// jump height / horizontal preservation). 0 = never skip, 100 = always.
+// YAW_DEADZONE: minimum per-tick yaw delta (deg) to trigger auto-strafe, filters
+// mouse jitter.
+// CMD_MAX_MOVE: the magnitude we push into the cmd move fields (engine clamps
+// to sv_maxspeed anyway, 450 is the conventional full-press value).
+static constexpr float STAMINA_CAP  = 50.0f;
+static constexpr float YAW_DEADZONE = 0.25f;
+static constexpr float CMD_MAX_MOVE = 450.0f;
+
+// diagnostic throttle.
+static int g_lastDiagTick = -1;
+
 // pull the local pawn off the entity table. handle is at client+dwLocalPlayerPawn,
 // table layout: pages of 512 x 120-byte slots. returns null when not in a match.
 static void* ResolveLocalPawn() {
@@ -177,14 +192,93 @@ static bool GameHasFocus() {
 	return pid == GetCurrentProcessId();
 }
 
+// gather everything we read off the pawn/mvs once per hook call so pre- and
+// post-phase share the same snapshot instead of re-walking the entity table.
+struct TickSnapshot {
+	void*    pawn     = nullptr;
+	void*    mvs      = nullptr;
+	bool     onGround = false;
+	bool     valid    = false;
+	float    speed2d  = 0.0f;
+	float    yawVel   = 0.0f;
+	float    stamina  = 0.0f;
+	uint32_t flags    = 0;
+};
+
+static TickSnapshot ReadTickSnapshot() {
+	TickSnapshot s{};
+	s.pawn = ResolveLocalPawn();
+	if (!s.pawn)
+		return s;
+
+	auto* pawnB = static_cast<uint8_t*>(s.pawn);
+	s.flags     = *reinterpret_cast<uint32_t*>(pawnB + offsets::m_fFlags);
+	const uint32_t hGround = *reinterpret_cast<uint32_t*>(pawnB + offsets::m_hGroundEntity);
+	s.onGround  = (s.flags & offsets::FL_ONGROUND) != 0 || hGround != UINT32_MAX;
+
+	const float* vel = reinterpret_cast<const float*>(pawnB + offsets::m_vecVelocity);
+	s.speed2d = std::sqrt(vel[0] * vel[0] + vel[1] * vel[1]);
+
+	// QAngle layout: [0]=pitch, [1]=yaw, [2]=roll. yaw-velocity drives autostrafe.
+	const float* angVel = reinterpret_cast<const float*>(pawnB + offsets::m_angEyeAnglesVelocity);
+	s.yawVel = angVel[1];
+
+	s.mvs = *reinterpret_cast<void**>(pawnB + offsets::m_pMovementServices);
+	if (s.mvs) {
+		// stamina lives on CCSPlayer_MovementServices (subclass). offset is valid
+		// for CS players - this DLL only targets CS2 so every local pawn is one.
+		s.stamina = *reinterpret_cast<const float*>(static_cast<uint8_t*>(s.mvs) + offsets::m_flStamina);
+	}
+	s.valid = true;
+	return s;
+}
+
+// autostrafe: while airborne and player is turning their view, write the
+// matching strafe direction into the cmd's move fields so the engine applies
+// optimal air-accel. perpendicular wishdir maxes air-acceleration since the
+// dot(vel, wish) term goes to zero and add_speed hits the airaccel cap.
+//
+// driven by m_angEyeAnglesVelocity.y so it tracks actual mouse movement rather
+// than auto-zigzagging (which would look obviously bot-like). no mouse input
+// -> no override, original move values pass through.
+//
+// run BEFORE oCreateMove so our values are what the cmd-builder reads. the
+// cmd ships to the server with our sidemove, server applies the same airaccel
+// we predict client-side, so no prediction desync + no CRC issue (we're not
+// mutating the cmd itself, just the pre-cmd inputs the builder pulls from).
+static void ApplyAutostrafe(const TickSnapshot& s) {
+	if (!s.valid || !s.mvs || s.onGround)
+		return;
+
+	float side = 0.0f;
+	if (s.yawVel > YAW_DEADZONE)
+		side = +CMD_MAX_MOVE; // turning right
+	else if (s.yawVel < -YAW_DEADZONE)
+		side = -CMD_MAX_MOVE; // turning left
+	else
+		return; // player isn't steering -> leave their input alone
+
+	auto* mvsB = static_cast<uint8_t*>(s.mvs);
+	// write BOTH the cmd-staging value (read by the builder for cmd.sidemove)
+	// AND the physics-consumed value so any immediate prediction step lines up.
+	*reinterpret_cast<float*>(mvsB + offsets::m_flCmdLeftMove) = side;
+	*reinterpret_cast<float*>(mvsB + offsets::m_flLeftMove)    = side;
+}
+
 static void __fastcall hkCreateMove(const uintptr_t pThis, const unsigned slot, const uintptr_t cmd) {
-	// let the original run first. engine's input pipeline reads dwForceJump for
-	// THIS cmd inside its own pre-CreateMove step, so our write here staged is
-	// picked up on the NEXT tick. write-before caused the engine to miss edges
-	// entirely in CS2 (the "just pressed" bit gets latched/cleared elsewhere).
+	const bool held = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0 && GameHasFocus();
+
+	// snapshot state once - both phases use it.
+	const TickSnapshot snap = ReadTickSnapshot();
+
+	// ===== PRE-PHASE: autostrafe (writes must land before cmd-builder reads) =====
+	if (held)
+		ApplyAutostrafe(snap);
+
+	// ===== ORIGINAL: engine builds this tick's cmd, including our strafe =====
 	oCreateMove(pThis, slot, cmd);
 
-	const bool held = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0 && GameHasFocus();
+	// ===== POST-PHASE: stage dwForceJump for next tick's cmd =====
 	if (!held) {
 		*g_pForceJump  = FJ_RELEASE;
 		g_lastBhopTick = -1;
@@ -196,42 +290,49 @@ static void __fastcall hkCreateMove(const uintptr_t pThis, const unsigned slot, 
 	if (!ngc)
 		return;
 	const int tick = *reinterpret_cast<int*>(static_cast<uint8_t*>(ngc) + offsets::dwNetworkGameClient_clientTick);
-
-	// one decision per server tick, regardless of FPS.
 	if (tick == g_lastBhopTick)
 		return;
 	g_lastBhopTick = tick;
 
-	// primary path: ground gate via m_fFlags & FL_ONGROUND OR-ed with
-	// m_hGroundEntity (handle != UINT32_MAX). FL_ONGROUND can lag by a tick on
-	// edge contacts (stairs, rotating brushes); the ground entity handle
-	// transitions one step earlier in those cases, so OR-ing catches both.
-	if (void* pawn = ResolveLocalPawn()) {
-		const uint32_t flags   = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(pawn) + offsets::m_fFlags);
-		const uint32_t hGround = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(pawn) + offsets::m_hGroundEntity);
-		const bool onGround    = (flags & offsets::FL_ONGROUND) != 0 || hGround != UINT32_MAX;
-
-		if (onGround) {
-			// subtick precision: force the jump edge to emit at t=0.0 of this
-			// tick so we don't waste the fraction of tick between ground contact
-			// and the engine's default subtick slot. writes all 4 slots (attack,
-			// attack2, jump, duck) because only buttons whose force-* cell is
-			// PRESS consume the value, so stray writes to the others are inert.
-			void* mvs = *reinterpret_cast<void**>(static_cast<uint8_t*>(pawn) + offsets::m_pMovementServices);
-			if (mvs) {
-				float* arr = reinterpret_cast<float*>(static_cast<uint8_t*>(mvs) + offsets::m_arrForceSubtickMoveWhen);
+	// primary path: pawn reachable, use real ground + stamina gating.
+	if (snap.valid) {
+		if (snap.onGround) {
+			// stamina gate: a fresh bhop just landed with high stamina loses a
+			// chunk of horizontal velocity via m_flVelMulAtJumpStart. skipping
+			// the next jump for a tick lets stamina decay, so the NEXT jump
+			// preserves full horizontal speed. net: chain at slightly lower
+			// cadence but much higher max speed.
+			if (snap.stamina > STAMINA_CAP) {
+				*g_pForceJump = FJ_RELEASE;
+			} else if (snap.mvs) {
+				// subtick precision: emit jump edge at tick-fraction 0.0 so we
+				// don't waste the fraction between ground contact and the
+				// engine's default (late) subtick slot.
+				float* arr = reinterpret_cast<float*>(static_cast<uint8_t*>(snap.mvs) +
+				                                     offsets::m_arrForceSubtickMoveWhen);
 				arr[0] = arr[1] = arr[2] = arr[3] = 0.0f;
+				*g_pForceJump = FJ_PRESS;
+			} else {
+				*g_pForceJump = FJ_PRESS;
 			}
-			*g_pForceJump = FJ_PRESS;
 		} else {
 			*g_pForceJump = FJ_RELEASE;
 		}
 		g_tickFlip = false;
+
+		// periodic diagnostics (~1/sec at 64 tick). log shows up in our console
+		// so the user can see what bhop is seeing without needing an external
+		// velocity hud.
+		if (tick - g_lastDiagTick >= 64 || g_lastDiagTick < 0) {
+			g_lastDiagTick = tick;
+			Log("[bhop] spd=%5.1f stam=%5.1f yawv=%+6.2f %s\n",
+			    snap.speed2d, snap.stamina, snap.yawVel, snap.onGround ? "GND" : "AIR");
+		}
 		return;
 	}
 
-	// fallback: pawn unreachable (pre-match, mid-respawn, loading). revert to
-	// the old alternating flip so we at least get the CSGO-era ~50% bhop rate
+	// fallback: pawn unreachable (pre-match, mid-respawn, loading). old
+	// alternating flip so at least we get the CSGO-era ~50% bhop rate
 	// instead of silence.
 	g_tickFlip    = !g_tickFlip;
 	*g_pForceJump = g_tickFlip ? FJ_PRESS : FJ_RELEASE;
