@@ -11,6 +11,7 @@ namespace offsets {
 
     // C_BaseEntity netvar
     constexpr uintptr_t m_fFlags           = 0x3F8; // uint32
+    constexpr uint32_t  FL_ONGROUND        = 1 << 0;
 
     // jump button state the engine reads. dumper calls this buttons::jump now.
     // press = 0x10001, release = 0x100.

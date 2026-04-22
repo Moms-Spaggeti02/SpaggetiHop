@@ -36,8 +36,8 @@ static void LogError(const char* fmt, ...) {
 	}
 	va_end(a);
 
-	char path[MAX_PATH] = {};
-	const char* logName = "bhop_error.log";
+	char        path[MAX_PATH] = {};
+	const char* logName        = "bhop_error.log";
 	if (g_hMod && GetModuleFileNameA(g_hMod, path, MAX_PATH)) {
 		if (char* slash = strrchr(path, '\\'); slash && (slash + 1 - path) + strlen(logName) < MAX_PATH)
 			strcpy_s(slash + 1, MAX_PATH - (slash + 1 - path), logName);
@@ -59,9 +59,9 @@ static void LogError(const char* fmt, ...) {
 
 static uintptr_t PatternScan(const uintptr_t base, const size_t size, const char* sig) {
 	constexpr size_t MAX_TOKENS = 256;
-	uint8_t bytes[MAX_TOKENS];
-	bool    wild[MAX_TOKENS];
-	size_t  n = 0;
+	uint8_t          bytes[MAX_TOKENS];
+	bool             wild[MAX_TOKENS];
+	size_t           n = 0;
 
 	auto isHex = [](const char c) -> bool {
 		return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
@@ -78,8 +78,7 @@ static uintptr_t PatternScan(const uintptr_t base, const size_t size, const char
 
 	for (const char* p = sig; *p;) {
 		if (n >= MAX_TOKENS) {
-			LogError("[!] PatternScan: sig exceeds %zu-byte limit, truncated at '%s'\n",
-				MAX_TOKENS, p);
+			LogError("[!] PatternScan: sig exceeds %zu-byte limit, truncated at '%s'\n", MAX_TOKENS, p);
 			return 0;
 		}
 		if (*p == ' ') {
@@ -96,8 +95,8 @@ static uintptr_t PatternScan(const uintptr_t base, const size_t size, const char
 			continue;
 		}
 		if (!isHex(p[0]) || !isHex(p[1])) {
-			LogError("[!] PatternScan: odd-length or non-hex token at offset %td ('%c%c')\n",
-				p - sig, p[0] ? p[0] : '?', p[1] ? p[1] : '?');
+			LogError("[!] PatternScan: odd-length or non-hex token at offset %td ('%c%c')\n", p - sig,
+			         p[0] ? p[0] : '?', p[1] ? p[1] : '?');
 			return 0;
 		}
 		wild[n]    = false;
@@ -131,44 +130,93 @@ size_t ModuleSize(const uintptr_t base) {
 
 using fnCreateMove = void(__fastcall*)(uintptr_t, unsigned, uintptr_t);
 
-uintptr_t     g_clientBase = 0;
-uintptr_t     g_engineBase = 0;
-fnCreateMove  oCreateMove  = nullptr;
-uint32_t*     g_pForceJump = nullptr;
-void**        g_pNGC       = nullptr; // &CNetworkGameClient*
+uintptr_t    g_clientBase = 0;
+uintptr_t    g_engineBase = 0;
+fnCreateMove oCreateMove  = nullptr;
+uint32_t*    g_pForceJump = nullptr;
+void**       g_pNGC       = nullptr; // &CNetworkGameClient*
 
 // two ways we can unload: user hit END, or DllMain got DETACH'd.
 // DETACH runs under the loader lock so FreeConsole/fclose/FreeLibrary
 // will deadlock. gotta skip cleanup in that case.
-enum UnloadReason : int { UNLOAD_NONE = 0, UNLOAD_USER = 1, UNLOAD_DETACH = 2 };
+enum UnloadReason : int {
+	UNLOAD_NONE   = 0,
+	UNLOAD_USER   = 1,
+	UNLOAD_DETACH = 2
+};
+
 volatile long g_unloadReason = UNLOAD_NONE;
 
-// read the tick counter, flip PRESS/RELEASE whenever it changes.
-// one state per tick, no misfires.
-static bool g_jumpActive = false;
-static int  g_lastTick   = -1;
+// one state change per server tick, no matter how many CreateMove calls.
+static int  g_lastBhopTick = -1;
+// fallback toggle when pawn/ground can't be resolved (warmup, respawn, etc).
+// keeps us at old-tick-flip behavior instead of going silent.
+static bool g_tickFlip = false;
+
+// pull the local pawn off the entity table. handle is at client+dwLocalPlayerPawn,
+// table layout: pages of 512 x 120-byte slots. returns null when not in a match.
+static void* ResolveLocalPawn() {
+	void* entSys = *reinterpret_cast<void**>(g_clientBase + offsets::dwEntityList);
+	if (!entSys)
+		return nullptr;
+	const uint32_t handle = *reinterpret_cast<uint32_t*>(g_clientBase + offsets::dwLocalPlayerPawn);
+	if (handle == UINT32_MAX)
+		return nullptr;
+	const uint32_t  listIdx = (handle & 0x7FFF) >> 9;
+	const uintptr_t chunk   = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(entSys) + 0x10 * listIdx + 0x8);
+	if (!chunk)
+		return nullptr;
+	return *reinterpret_cast<void**>(chunk + 120 * (handle & 0x1FF));
+}
+
+// don't intercept while alt-tabbed or typing in the console / menu.
+static bool GameHasFocus() {
+	const HWND fg  = GetForegroundWindow();
+	DWORD      pid = 0;
+	GetWindowThreadProcessId(fg, &pid);
+	return pid == GetCurrentProcessId();
+}
 
 static void __fastcall hkCreateMove(const uintptr_t pThis, const unsigned slot, const uintptr_t cmd) {
+	// let the original run first. engine's input pipeline reads dwForceJump for
+	// THIS cmd inside its own pre-CreateMove step, so our write here staged is
+	// picked up on the NEXT tick. write-before caused the engine to miss edges
+	// entirely in CS2 (the "just pressed" bit gets latched/cleared elsewhere).
 	oCreateMove(pThis, slot, cmd);
 
-	const bool space = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
-	if (!space) {
-		*g_pForceJump = FJ_RELEASE;
-		g_jumpActive  = false;
-		g_lastTick    = -1;
+	const bool held = (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0 && GameHasFocus();
+	if (!held) {
+		*g_pForceJump  = FJ_RELEASE;
+		g_lastBhopTick = -1;
+		g_tickFlip     = false;
 		return;
 	}
 
 	void* ngc = *g_pNGC;
-	if (!ngc) return;
+	if (!ngc)
+		return;
 	const int tick = *reinterpret_cast<int*>(static_cast<uint8_t*>(ngc) + offsets::dwNetworkGameClient_clientTick);
 
-	if (tick == g_lastTick)
+	// one decision per server tick, regardless of FPS.
+	if (tick == g_lastBhopTick)
 		return;
-	g_lastTick = tick;
+	g_lastBhopTick = tick;
 
-	*g_pForceJump = g_jumpActive ? FJ_RELEASE : FJ_PRESS;
-	g_jumpActive  = !g_jumpActive;
+	// primary path: FL_ONGROUND gate. emit PRESS only on ground ticks so each
+	// landing converts cleanly instead of the 50/50 lottery the pure-flip had.
+	if (void* pawn = ResolveLocalPawn()) {
+		const uint32_t flags    = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(pawn) + offsets::m_fFlags);
+		const bool     onGround = (flags & offsets::FL_ONGROUND) != 0;
+		*g_pForceJump           = onGround ? FJ_PRESS : FJ_RELEASE;
+		g_tickFlip              = false;
+		return;
+	}
+
+	// fallback: pawn unreachable (pre-match, mid-respawn, loading). revert to
+	// the old alternating flip so we at least get the CSGO-era ~50% bhop rate
+	// instead of silence.
+	g_tickFlip    = !g_tickFlip;
+	*g_pForceJump = g_tickFlip ? FJ_PRESS : FJ_RELEASE;
 }
 
 static DWORD WINAPI MainThread(const LPVOID hMod) {
@@ -183,9 +231,9 @@ static DWORD WINAPI MainThread(const LPVOID hMod) {
 	while (!((engine = GetModuleHandleA("engine2.dll"))))
 		Sleep(100);
 
-	g_clientBase = reinterpret_cast<uintptr_t>(client);
-	g_engineBase = reinterpret_cast<uintptr_t>(engine);
-	const size_t size  = ModuleSize(g_clientBase);
+	g_clientBase      = reinterpret_cast<uintptr_t>(client);
+	g_engineBase      = reinterpret_cast<uintptr_t>(engine);
+	const size_t size = ModuleSize(g_clientBase);
 
 	Log("[bhop] modules resolved\n");
 
@@ -203,7 +251,8 @@ static DWORD WINAPI MainThread(const LPVOID hMod) {
 		Log("[!] MH_Initialize\n");
 		return 1;
 	}
-	if (MH_CreateHook(reinterpret_cast<LPVOID>(cmAddr), &hkCreateMove, reinterpret_cast<LPVOID*>(&oCreateMove)) != MH_OK) {
+	if (MH_CreateHook(reinterpret_cast<LPVOID>(cmAddr), &hkCreateMove, reinterpret_cast<LPVOID*>(&oCreateMove)) !=
+	    MH_OK) {
 		Log("[!] MH_CreateHook\n");
 		return 1;
 	}
