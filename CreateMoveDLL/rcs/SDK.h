@@ -11,8 +11,15 @@ namespace offsets {
 
     // C_BaseEntity netvars
     constexpr uintptr_t m_fFlags           = 0x3F8; // uint32
+    constexpr uintptr_t m_vecVelocity      = 0x430; // CNetworkVelocityVector (first 12 bytes = Vector xyz)
     constexpr uintptr_t m_hGroundEntity    = 0x530; // CHandle (UINT32_MAX = not on ground)
     constexpr uint32_t  FL_ONGROUND        = 1 << 0;
+
+    // C_CSPlayerPawn: real-time view angles for autostrafe.
+    // m_angEyeAnglesVelocity[.y] gives per-tick yaw delta — positive = mouse
+    // moved right, negative = left. threshold it to drive strafe direction.
+    constexpr uintptr_t m_angEyeAngles         = 0x3300; // QAngle (pitch=[0], yaw=[1], roll=[2])
+    constexpr uintptr_t m_angEyeAnglesVelocity = 0x33D0; // QAngle
 
     // C_CSPlayerPawn -> CPlayer_MovementServices*
     constexpr uintptr_t m_pMovementServices = 0x1220;
@@ -21,6 +28,23 @@ namespace offsets {
     // write 0.0 to get earliest-in-tick timing for the jump press, giving the
     // engine sub-tick precision on the bhop instead of whole-tick granularity.
     constexpr uintptr_t m_arrForceSubtickMoveWhen = 0x1B0;
+
+    // CPlayer_MovementServices: input cmd move values. writing these pre-CreateMove
+    // feeds the cmd builder our autostrafe values so the cmd ships with our
+    // wishdir rather than what the keyboard reported.
+    constexpr uintptr_t m_flMaxspeed       = 0x1AC; // float
+    constexpr uintptr_t m_flCmdForwardMove = 0x1A0; // float (+ = W, - = S)
+    constexpr uintptr_t m_flCmdLeftMove    = 0x1A4; // float (+ = D, - = A)
+    constexpr uintptr_t m_flForwardMove    = 0x1C0; // float (physics-consumed)
+    constexpr uintptr_t m_flLeftMove       = 0x1C4; // float (physics-consumed)
+
+    // CCSPlayer_MovementServices (subclass) - stamina + last-jump tracking.
+    // m_flStamina rises on jump, decays over time. high stamina = reduced jump
+    // height AND m_flVelMulAtJumpStart dampened horizontal velocity preservation.
+    // gate jumps on high stamina -> consistent max-height chain.
+    constexpr uintptr_t m_flStamina            = 0x674; // float [0, ~100]
+    constexpr uintptr_t m_nLastJumpTick        = 0x6E0; // GameTick_t (int32)
+    constexpr uintptr_t m_flVelMulAtJumpStart  = 0x688; // float
 
     // jump button state the engine reads. dumper calls this buttons::jump now.
     // press = 0x10001, release = 0x100.
