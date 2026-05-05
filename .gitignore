@@ -47,6 +47,8 @@ SpaggetiHop.rar
 
 # tooling
 .mcp.json
+.claude/
+CLAUDE.md
 
 # OS
 Thumbs.db

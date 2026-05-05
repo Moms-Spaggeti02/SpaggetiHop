@@ -1,12 +1,14 @@
 #include <Windows.h>
 #include <TlHelp32.h>
 #include <psapi.h>
+#include <shellapi.h>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <vector>
 
 #pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "shell32.lib")
 
 // manual-map launcher.
 // dll is baked in as an RCDATA resource, we map it into cs2 ourselves.
@@ -427,6 +429,22 @@ int main() {
 		return 1;
 	}
 	Log("[+] embedded DLL: %zu bytes\n", dllSize);
+
+	// kick CS2 via Steam if it's not already up. direct exec'ing cs2.exe
+	// doesn't work without Steam's bootstrap (auth, anti-cheat init, etc),
+	// and the URI no-ops cleanly when the game's already running.
+	DWORD pid = GetProcessIdByName(L"cs2.exe");
+	if (!pid) {
+		Log("[*] cs2.exe not running, launching via Steam (appid 730)\n");
+		const auto rc = reinterpret_cast<INT_PTR>(ShellExecuteA(
+			nullptr, "open", "steam://rungameid/730", nullptr, nullptr, SW_SHOWNORMAL));
+		if (rc <= 32) {
+			Log("[!] ShellExecute(steam://) returned %lld - is Steam installed?\n", static_cast<long long>(rc));
+		}
+	} else {
+		Log("[+] cs2.exe already running (PID=%lu)\n", pid);
+	}
+
 	Log("[*] waiting for cs2.exe...\n");
 
 	// start the wave *after* all the pre-wait log lines, otherwise stdout
@@ -435,8 +453,7 @@ int main() {
 	g_animRun = 1;
 	const HANDLE hAnim = CreateThread(nullptr, 0, AnimateThread, nullptr, 0, nullptr);
 
-	DWORD pid = 0;
-	for (int i = 0; i < 600; i++) { // ~5 min
+	for (int i = 0; i < 600 && !pid; i++) { // ~5 min
 		pid = GetProcessIdByName(L"cs2.exe");
 		if (pid) break;
 		Sleep(500);
