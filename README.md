@@ -6,6 +6,9 @@ Single-file loader — no manual injector, no external DLL to drop in. Launch `S
 
 > **⚠️ Launch `SpaggetiHop.exe` BEFORE `cs2.exe`.** The loader waits for CS2 and injects as it starts up — running it after CS2 is already open is unreliable.
 
+
+> **Also if anyone who has more knowledge than me in the subject can figure out why the jump timing is not tick perfect feel free to let me know the reason for it. Thanks.**
+
 ## Features
 
 - **Tick-synced jumps.** Toggles the jump state once per client tick, so there's no double-press, no skipped hop, no luck involved.
